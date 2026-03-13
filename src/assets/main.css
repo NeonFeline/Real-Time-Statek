@@ -1,0 +1,40 @@
+@import './base.css';
+
+/* 1. Reset the foundation to fill the screen with no invisible borders */
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+  background-color: #110d0a; /* Match the dark wood theme of your game */
+  overflow-x: hidden; /* Prevent horizontal scrolling on mobile */
+}
+
+/* 2. Allow the Vue app to use 100% of the available space */
+#app {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 3. Keep standard link styles, but changed to your golden wood theme */
+a,
+.green {
+  text-decoration: none;
+  color: #ffd54f;
+  transition: 0.4s;
+  padding: 3px;
+}
+
+@media (hover: hover) {
+  a:hover {
+    background-color: rgba(255, 213, 79, 0.2);
+  }
+}
+
+/* NOTE: The entire @media (min-width: 1024px) block was DELETED.
+  It was forcing your game into a weird 50/50 split screen.
+*/
