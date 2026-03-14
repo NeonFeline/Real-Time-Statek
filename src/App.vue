@@ -170,7 +170,7 @@ function getMissOpacity(x, y, isMyBoard) {
 <template>
   <div v-if="inLobby" class="game-wrapper lobby-wrapper">
     <div class="lobby-panel wood-panel">
-      <h1 class="lobby-title">NAVAL WARFARE</h1>
+      <h1 class="lobby-title">Real-Time Statek (RTS)</h1>
 
       <div v-if="!roomCode" class="lobby-controls">
         <button class="wood-btn big-btn" @click="createRoom">
