@@ -22,7 +22,7 @@ const io = new Server(httpServer, {
 
 // --- GAME CONFIGURATION ---
 const GRID_SIZE = 20;
-const FLEET_SIZES = [10, 7, 6, 6, 5, 4, 4, 3, 3, 3];
+const FLEET_SIZES = [7, 6, 5, 4, 4, 3, 3, 3];
 
 // Store multiple active games by their Room ID
 const games = {};
@@ -45,7 +45,6 @@ function getShipTiles(
   return tiles;
 }
 
-// Updated to accept the specific 'game' object instead of a global state
 function isValidPlacement(tiles, playerId, ignoreShipId = null, game) {
   for (let t of tiles) {
     if (t.x < 0 || t.x >= GRID_SIZE || t.y < 0 || t.y >= GRID_SIZE)
@@ -73,7 +72,6 @@ function generateRandomFleet() {
       const y = Math.floor(Math.random() * GRID_SIZE);
       const proposedTiles = getShipTiles({ length }, x, y, isVertical);
 
-      // Create a temporary mock game object to check validation without polluting real data
       const mockGame = { boards: { temp: fleet } };
 
       if (isValidPlacement(proposedTiles, "temp", null, mockGame)) {
@@ -115,6 +113,25 @@ function checkWinCondition(roomId) {
   }
 }
 
+// --- NEW: RECONNECTION HELPER ---
+// Moves all data from a disconnected socket ID to the new reconnected socket ID
+function replacePlayerId(game, oldId, newId) {
+  game.players[newId] = true;
+  delete game.players[oldId];
+
+  if (game.boards[oldId]) {
+    game.boards[newId] = game.boards[oldId];
+    delete game.boards[oldId];
+  }
+  if (game.opponentMisses[oldId]) {
+    game.opponentMisses[newId] = game.opponentMisses[oldId];
+    delete game.opponentMisses[oldId];
+  }
+
+  if (game.turn === oldId) game.turn = newId;
+  if (game.winner === oldId) game.winner = newId;
+}
+
 // --- SOCKET LISTENERS ---
 io.on("connection", socket => {
   console.log("A player connected:", socket.id);
@@ -133,19 +150,19 @@ io.on("connection", socket => {
   // --- LOBBY SYSTEM ---
 
   socket.on("createGame", () => {
-    // Generate a random 4-character room code
     const roomId = Math.random()
       .toString(36)
       .substring(2, 6)
       .toUpperCase();
 
     games[roomId] = {
-      players: { [socket.id]: true },
+      players: { [socket.id]: true }, // 'true' means connected
       turn: null,
       apRemaining: AP_TURN_COUNT,
       boards: { [socket.id]: generateRandomFleet() },
       opponentMisses: { [socket.id]: [] },
-      winner: null
+      winner: null,
+      destroyTimer: null
     };
 
     socket.roomId = roomId;
@@ -158,20 +175,45 @@ io.on("connection", socket => {
     const game = games[roomId];
 
     if (!game) return socket.emit("errorMsg", "Room not found.");
-    if (Object.keys(game.players).length >= 2)
+
+    // Check if there is an offline player slot we can reclaim
+    const disconnectedId = Object.keys(game.players).find(
+      id => game.players[id] === false
+    );
+
+    if (disconnectedId) {
+      // 1. Reconnect Player
+      replacePlayerId(game, disconnectedId, socket.id);
+      socket.roomId = roomId;
+      socket.join(roomId);
+
+      // 2. Clear the destruction timer since a player returned
+      if (game.destroyTimer) {
+        clearTimeout(game.destroyTimer);
+        game.destroyTimer = null;
+      }
+
+      // 3. Resync the UI. Emit gameStart only to the reconnected player to build their UI,
+      // and updateState to the opponent so they know you are back.
+      if (Object.keys(game.players).length === 2) {
+        socket.emit("gameStart", game);
+        socket.to(roomId).emit("updateState", game);
+      }
+    } else if (Object.keys(game.players).length < 2) {
+      // Normal Join for a new player
+      game.players[socket.id] = true;
+      game.boards[socket.id] = generateRandomFleet();
+      game.opponentMisses[socket.id] = [];
+
+      socket.roomId = roomId;
+      socket.join(roomId);
+
+      if (Object.keys(game.players).length === 2) {
+        game.turn = Object.keys(game.players)[0];
+        io.to(roomId).emit("gameStart", game);
+      }
+    } else {
       return socket.emit("errorMsg", "Room is full.");
-
-    game.players[socket.id] = true;
-    game.boards[socket.id] = generateRandomFleet();
-    game.opponentMisses[socket.id] = [];
-
-    socket.roomId = roomId;
-    socket.join(roomId);
-
-    // Start game if 2 players have joined
-    if (Object.keys(game.players).length === 2) {
-      game.turn = Object.keys(game.players)[0];
-      io.to(roomId).emit("gameStart", game);
     }
   });
 
@@ -184,7 +226,6 @@ io.on("connection", socket => {
     if (!game || game.turn !== socket.id || game.apRemaining < 1 || game.winner)
       return;
 
-    // Validate map boundaries (fixes the edge-click bug)
     if (
       typeof x !== "number" ||
       typeof y !== "number" ||
@@ -197,12 +238,6 @@ io.on("connection", socket => {
 
     const enemyId = Object.keys(game.players).find(id => id !== socket.id);
 
-    // Prevent AP drain on already missed spots
-    const alreadyMissed = game.opponentMisses[enemyId].some(
-      m => m.x === x && m.y === y
-    );
-    if (alreadyMissed) return;
-
     let hitSomething = false;
     let alreadyHit = false;
 
@@ -212,7 +247,7 @@ io.on("connection", socket => {
 
       if (hitIndex !== -1) {
         if (ship.hits[hitIndex] === true) {
-          alreadyHit = true; // Prevent AP drain on burning ship segments
+          alreadyHit = true;
         } else {
           ship.hits[hitIndex] = true;
           hitSomething = true;
@@ -221,12 +256,18 @@ io.on("connection", socket => {
       }
     }
 
-    if (alreadyHit) return;
-
-    if (!hitSomething) {
-      game.opponentMisses[enemyId].push({ x, y });
+    // Only register a new miss if it hit water and isn't already in the array
+    if (!hitSomething && !alreadyHit) {
+      const alreadyMissed = game.opponentMisses[enemyId].some(
+        m => m.x === x && m.y === y
+      );
+      if (!alreadyMissed) {
+        game.opponentMisses[enemyId].push({ x, y });
+      }
     }
 
+    // EXPLOIT FIX: Consume AP unconditionally!
+    // If they shoot already-missed water, or an already-burning ship, let them waste the AP.
     consumeAP(roomId, 1);
   });
 
@@ -286,15 +327,24 @@ io.on("connection", socket => {
     }
   });
 
-  // --- DISCONNECT HANDLING ---
+  // --- RECONNECTION LOGIC: DISCONNECT HANDLING ---
   socket.on("disconnect", () => {
     console.log("Player disconnected:", socket.id);
     const roomId = socket.roomId;
 
     if (roomId && games[roomId]) {
-      // Notify the remaining player that they won by default due to disconnect
-      io.to(roomId).emit("enemyDisconnected");
-      delete games[roomId]; // Clean up the game from memory
+      const game = games[roomId];
+
+      // Mark player as offline instead of deleting the room
+      game.players[socket.id] = false;
+
+      // Start a 10-minute countdown to clean up memory if they never return
+      if (!game.destroyTimer) {
+        game.destroyTimer = setTimeout(() => {
+          delete games[roomId];
+          console.log(`Room ${roomId} deleted due to inactivity.`);
+        }, 10 * 60 * 1000); // 10 minutes in milliseconds
+      }
     }
   });
 });

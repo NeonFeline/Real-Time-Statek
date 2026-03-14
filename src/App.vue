@@ -50,11 +50,6 @@ onMounted(() => {
     errorMessage.value = msg;
   });
 
-  socket.on("enemyDisconnected", () => {
-    alert("Enemy disconnected! The battle is over.");
-    window.location.href = "/"; // Refresh back to main menu
-  });
-
   // 3. Game Listeners
   socket.on("gameStart", state => {
     inLobby.value = false;
@@ -70,10 +65,19 @@ onMounted(() => {
 
   socket.on("updateState", state => {
     gameState.value = state;
+
+    // Safety check: if our turn was revoked, deselect ships
     if (state.turn !== myId.value) selectedShip.value = null;
 
-    if (lastTurnId.value !== state.turn) {
+    // Turn tracking for decay graphics (ignores ID swaps from reconnections)
+    if (
+      lastTurnId.value &&
+      lastTurnId.value !== state.turn &&
+      state.players[state.turn] !== false
+    ) {
       localTurnCount.value++;
+      lastTurnId.value = state.turn;
+    } else if (!lastTurnId.value) {
       lastTurnId.value = state.turn;
     }
 
@@ -127,7 +131,15 @@ const enemyId = computed(() => {
   return Object.keys(gameState.value.players).find(id => id !== myId.value);
 });
 
-const isMyTurn = computed(() => gameState.value?.turn === myId.value);
+// NEW: Check if the enemy is disconnected based on the boolean flag
+const enemyOffline = computed(() => {
+  if (!gameState.value || !enemyId.value) return false;
+  return gameState.value.players[enemyId.value] === false;
+});
+
+const isMyTurn = computed(
+  () => gameState.value?.turn === myId.value && !enemyOffline.value
+);
 const winner = computed(() => gameState.value?.winner);
 const myShips = computed(() => gameState.value?.boards[myId.value] || []);
 const enemyShips = computed(() => gameState.value?.boards[enemyId.value] || []);
@@ -205,10 +217,17 @@ function getMissOpacity(x, y, isMyBoard) {
   </div>
 
   <div v-else-if="gameState && enemyId" class="game-wrapper">
-    <div class="hud wood-panel">
+    <div v-if="enemyOffline" class="offline-banner wood-panel blink">
+      ⚠️ RADAR CONTACT LOST! WAITING FOR OPPONENT TO RECONNECT... ⚠️
+    </div>
+
+    <div class="hud wood-panel" :class="{ dimmed: enemyOffline }">
       <div class="status-panel">
         <h2 :class="{ 'turn-active': isMyTurn, 'turn-waiting': !isMyTurn }">
-          {{ isMyTurn ? "YOUR ORDERS, CAPTAIN" : "WAITING FOR ENEMY MOVES..." }}
+          <span v-if="enemyOffline">COMMUNICATIONS SEVERED</span>
+          <span v-else>{{
+            isMyTurn ? "YOUR ORDERS, CAPTAIN" : "WAITING FOR ENEMY MOVES..."
+          }}</span>
         </h2>
         <div class="ap-badge">AP: {{ gameState.apRemaining }}</div>
       </div>
@@ -247,7 +266,7 @@ function getMissOpacity(x, y, isMyBoard) {
       </button>
     </div>
 
-    <div v-else class="boards-container">
+    <div v-else class="boards-container" :class="{ dimmed: enemyOffline }">
       <div class="board-wrapper">
         <h3 class="board-title">ALLIED FLEET</h3>
         <div class="board wood-frame">
@@ -403,6 +422,28 @@ function getMissOpacity(x, y, isMyBoard) {
   .game-wrapper {
     --cell-size: 28px;
   }
+}
+
+/* =========================================
+   NEW: OFFLINE BANNER
+   ========================================= */
+.offline-banner {
+  width: 100%;
+  max-width: 1000px;
+  background: linear-gradient(135deg, #7a2020, #421111);
+  color: #ffcccc;
+  text-align: center;
+  padding: 15px;
+  font-size: 1.5rem;
+  margin-bottom: 20px;
+  border-color: #ff4444;
+  box-shadow: inset 0 0 0 2px #aa3333, 4px 4px 10px rgba(0, 0, 0, 0.5);
+}
+
+.dimmed {
+  opacity: 0.5;
+  pointer-events: none; /* Stops the active player from clicking things while opponent is offline */
+  transition: opacity 0.3s;
 }
 
 /* =========================================

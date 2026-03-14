@@ -1,0 +1,1 @@
+1. Add cloning of the join code, as you cannot select it now
