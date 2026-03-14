@@ -4,10 +4,18 @@ import { io } from "socket.io-client";
 
 const socket = io();
 
+// --- LOBBY STATE ---
+const inLobby = ref(true);
+const roomCode = ref("");
+const joinInput = ref("");
+const errorMessage = ref("");
+
+// --- GAME STATE ---
 const myId = ref("");
 const gameState = ref(null);
 const selectedShip = ref(null);
 
+// --- VISUAL EFFECTS STATE ---
 const temporaryMisses = ref([]);
 let previousEnemyMissesCount = 0;
 
@@ -17,9 +25,39 @@ const myMissesData = ref(new Map());
 const enemyMissesData = ref(new Map());
 
 onMounted(() => {
-  socket.on("connect", () => (myId.value = socket.id));
+  // 1. Connection & Auto-Join
+  socket.on("connect", () => {
+    myId.value = socket.id;
 
+    // Check URL for a shareable link (e.g., ?room=A7X9)
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomFromUrl = urlParams.get("room");
+    if (roomFromUrl) {
+      joinInput.value = roomFromUrl;
+      socket.emit("joinGame", roomFromUrl);
+    }
+  });
+
+  // 2. Lobby Listeners
+  socket.on("roomCreated", code => {
+    roomCode.value = code;
+    errorMessage.value = "";
+    // Update URL so player can easily copy-paste to a friend
+    window.history.pushState({}, "", `?room=${code}`);
+  });
+
+  socket.on("errorMsg", msg => {
+    errorMessage.value = msg;
+  });
+
+  socket.on("enemyDisconnected", () => {
+    alert("Enemy disconnected! The battle is over.");
+    window.location.href = "/"; // Refresh back to main menu
+  });
+
+  // 3. Game Listeners
   socket.on("gameStart", state => {
+    inLobby.value = false;
     gameState.value = state;
     localTurnCount.value = 0;
     lastTurnId.value = state.turn;
@@ -72,6 +110,18 @@ onMounted(() => {
   });
 });
 
+// --- LOBBY ACTIONS ---
+function createRoom() {
+  socket.emit("createGame");
+}
+
+function joinRoom() {
+  if (joinInput.value.trim()) {
+    socket.emit("joinGame", joinInput.value.trim());
+  }
+}
+
+// --- GAME COMPUTEDS ---
 const enemyId = computed(() => {
   if (!gameState.value) return null;
   return Object.keys(gameState.value.players).find(id => id !== myId.value);
@@ -89,6 +139,7 @@ const enemyBoardMisses = computed(
   () => gameState.value?.opponentMisses[enemyId.value] || []
 );
 
+// --- GAMEPLAY ACTIONS ---
 function shoot(x, y) {
   if (isMyTurn.value) socket.emit("shoot", { x, y });
 }
@@ -117,7 +168,43 @@ function getMissOpacity(x, y, isMyBoard) {
 </script>
 
 <template>
-  <div v-if="gameState && enemyId" class="game-wrapper">
+  <div v-if="inLobby" class="game-wrapper lobby-wrapper">
+    <div class="lobby-panel wood-panel">
+      <h1 class="lobby-title">NAVAL WARFARE</h1>
+
+      <div v-if="!roomCode" class="lobby-controls">
+        <button class="wood-btn big-btn" @click="createRoom">
+          CREATE NEW BATTLE
+        </button>
+
+        <div class="join-section">
+          <input
+            v-model="joinInput"
+            placeholder="ENTER 4-LETTER CODE"
+            class="room-input"
+            maxlength="4"
+            @keyup.enter="joinRoom"
+          />
+          <button class="wood-btn big-btn" @click="joinRoom">
+            JOIN BATTLE
+          </button>
+        </div>
+
+        <p v-if="errorMessage" class="msg-error">{{ errorMessage }}</p>
+      </div>
+
+      <div v-else class="waiting-room">
+        <h2>YOUR ROOM CODE:</h2>
+        <h1 class="room-display">{{ roomCode }}</h1>
+        <p class="blink waiting-text">WAITING FOR OPPONENT...</p>
+        <p class="share-hint">
+          Or share the URL in your address bar with a friend!
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div v-else-if="gameState && enemyId" class="game-wrapper">
     <div class="hud wood-panel">
       <div class="status-panel">
         <h2 :class="{ 'turn-active': isMyTurn, 'turn-waiting': !isMyTurn }">
@@ -151,6 +238,13 @@ function getMissOpacity(x, y, isMyBoard) {
     <div v-if="winner" class="end-screen wood-panel">
       <h1>{{ winner === myId ? "VICTORY!" : "DEFEAT!" }}</h1>
       <p>The battle has concluded.</p>
+      <button
+        class="wood-btn"
+        style="margin-top: 20px;"
+        @click="window.location.href = '/'"
+      >
+        RETURN TO HQ
+      </button>
     </div>
 
     <div v-else class="boards-container">
@@ -280,12 +374,10 @@ function getMissOpacity(x, y, isMyBoard) {
 @import url("https://fonts.googleapis.com/css2?family=VT323&display=swap");
 
 /* =========================================
-   SCALABLE VARIABLES (Fixes Overflow)
+   SCALABLE VARIABLES & BASE
    ========================================= */
 .game-wrapper {
-  /* MOBILE FIRST: Fits standard phones */
   --cell-size: 17px;
-
   font-family: "VT323", monospace;
   background: #110d0a;
   color: #eaddcf;
@@ -295,14 +387,11 @@ function getMissOpacity(x, y, isMyBoard) {
   flex-direction: column;
   align-items: center;
   box-sizing: border-box;
-
-  /* Prevent blinking cursor & text highlighting on spam-clicking */
   user-select: none;
   -webkit-user-select: none;
   caret-color: transparent;
 }
 
-/* Tablets and small laptops */
 @media (min-width: 768px) {
   .game-wrapper {
     --cell-size: 22px;
@@ -310,11 +399,94 @@ function getMissOpacity(x, y, isMyBoard) {
   }
 }
 
-/* Large monitors */
 @media (min-width: 1400px) {
   .game-wrapper {
     --cell-size: 28px;
   }
+}
+
+/* =========================================
+   LOBBY STYLES
+   ========================================= */
+.lobby-wrapper {
+  justify-content: center;
+}
+
+.lobby-panel {
+  padding: 40px;
+  text-align: center;
+  max-width: 450px;
+  width: 100%;
+}
+
+.lobby-title {
+  color: #ffd54f;
+  font-size: 3rem;
+  margin-top: 0;
+  margin-bottom: 30px;
+  text-shadow: 2px 2px #000;
+}
+
+.lobby-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.join-section {
+  border-top: 2px dashed #75523a;
+  padding-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.room-input {
+  width: 100%;
+  padding: 10px;
+  background: #1a100a;
+  color: #f0e6d2;
+  border: 2px solid #75523a;
+  font-family: "VT323", monospace;
+  font-size: 1.8rem;
+  text-align: center;
+  text-transform: uppercase;
+  box-sizing: border-box;
+}
+
+.room-input:focus {
+  outline: none;
+  border-color: #ffd54f;
+}
+
+.big-btn {
+  font-size: 1.5rem;
+  width: 100%;
+  padding: 12px;
+}
+
+.waiting-room h2 {
+  color: #d7ccc8;
+  margin-bottom: 0;
+}
+
+.room-display {
+  font-size: 4rem;
+  margin: 10px 0;
+  color: #ffd54f;
+  letter-spacing: 5px;
+  text-shadow: 2px 2px #000;
+}
+
+.waiting-text {
+  color: #bcaaa4;
+  font-size: 1.5rem;
+}
+
+.share-hint {
+  color: #8d7b68;
+  font-size: 1.1rem;
+  margin-top: 20px;
 }
 
 /* =========================================
@@ -348,7 +520,7 @@ function getMissOpacity(x, y, isMyBoard) {
 }
 
 .status-panel h2 {
-  font-size: 1.5rem; /* Adjusted for mobile */
+  font-size: 1.5rem;
   margin: 0;
   letter-spacing: 1px;
 }
@@ -382,7 +554,7 @@ function getMissOpacity(x, y, isMyBoard) {
 }
 
 .action-panel {
-  min-height: 40px; /* Allows wrapping on phones without jumping */
+  min-height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -391,7 +563,7 @@ function getMissOpacity(x, y, isMyBoard) {
 
 .controls {
   display: flex;
-  flex-wrap: wrap; /* Wraps buttons nicely on small screens */
+  flex-wrap: wrap;
   justify-content: center;
   gap: 8px;
 }
@@ -438,7 +610,7 @@ function getMissOpacity(x, y, isMyBoard) {
    ========================================= */
 .boards-container {
   display: flex;
-  flex-wrap: wrap; /* Board will wrap on small screens, preventing horizontal overflow */
+  flex-wrap: wrap;
   justify-content: center;
   gap: 20px;
 }
@@ -469,7 +641,6 @@ function getMissOpacity(x, y, isMyBoard) {
 
 .board {
   position: relative;
-  /* Scalable Width and Height based on variable */
   width: calc(var(--cell-size) * 20);
   height: calc(var(--cell-size) * 20);
   background: #001a33;
@@ -520,7 +691,7 @@ img,
 }
 
 .ship-container.selected {
-  outline: 2px dashed #ffd54f; /* Yellow selection */
+  outline: 2px dashed #ffd54f;
   outline-offset: 1px;
   z-index: 10;
 }
@@ -542,7 +713,7 @@ img,
   transform: rotate(270deg);
 }
 .ship-container.vertical .ship-segment img:not(.overlay) {
-  transform: rotate(-0deg);
+  transform: rotate(0deg);
 }
 
 .overlay {
@@ -553,7 +724,6 @@ img,
   pointer-events: none;
 }
 
-/* Dynamic marker blocks */
 .marker {
   position: absolute;
   width: var(--cell-size);
@@ -578,6 +748,9 @@ img,
   margin-top: 40px;
   font-size: 1.5rem;
   color: #ffd54f;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 .end-screen h1 {
   font-size: 3rem;

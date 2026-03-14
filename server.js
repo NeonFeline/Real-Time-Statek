@@ -19,20 +19,14 @@ const io = new Server(httpServer, {
   cors: { origin: "*" }
 });
 
-// --- YOUR GAME LOGIC START ---
+// --- GAME CONFIGURATION ---
 const GRID_SIZE = 20;
-const FLEET_SIZES = [5, 4, 4, 3, 3, 3, 2, 2, 2, 2];
+const FLEET_SIZES = [10, 7, 6, 6, 5, 4, 4, 3, 3, 3];
 
-let gameState = {
-  players: {},
-  turn: null,
-  apRemaining: 3,
-  boards: {},
-  opponentMisses: {},
-  winner: null
-};
+// Store multiple active games by their Room ID
+const games = {};
 
-// ... [Keep all your helper functions: getShipTiles, isValidPlacement, etc. exactly as they were] ...
+// --- HELPER FUNCTIONS ---
 
 function getShipTiles(
   ship,
@@ -50,12 +44,14 @@ function getShipTiles(
   return tiles;
 }
 
-function isValidPlacement(tiles, playerId, ignoreShipId = null) {
+// Updated to accept the specific 'game' object instead of a global state
+function isValidPlacement(tiles, playerId, ignoreShipId = null, game) {
   for (let t of tiles) {
     if (t.x < 0 || t.x >= GRID_SIZE || t.y < 0 || t.y >= GRID_SIZE)
       return false;
-    if (!gameState.boards[playerId]) continue;
-    for (let s of gameState.boards[playerId]) {
+    if (!game.boards[playerId]) continue;
+
+    for (let s of game.boards[playerId]) {
       if (s.id === ignoreShipId) continue;
       let sTiles = getShipTiles(s);
       if (sTiles.some(st => st.x === t.x && st.y === t.y)) return false;
@@ -67,6 +63,7 @@ function isValidPlacement(tiles, playerId, ignoreShipId = null) {
 function generateRandomFleet() {
   const fleet = [];
   let shipCounter = 0;
+
   for (const length of FLEET_SIZES) {
     let placed = false;
     while (!placed) {
@@ -75,11 +72,10 @@ function generateRandomFleet() {
       const y = Math.floor(Math.random() * GRID_SIZE);
       const proposedTiles = getShipTiles({ length }, x, y, isVertical);
 
-      const tempStateBoards = [...fleet];
-      const oldBoards = gameState.boards;
-      gameState.boards = { temp: tempStateBoards };
+      // Create a temporary mock game object to check validation without polluting real data
+      const mockGame = { boards: { temp: fleet } };
 
-      if (isValidPlacement(proposedTiles, "temp")) {
+      if (isValidPlacement(proposedTiles, "temp", null, mockGame)) {
         shipCounter++;
         fleet.push({
           id: `ship_${shipCounter}_len${length}`,
@@ -91,31 +87,29 @@ function generateRandomFleet() {
         });
         placed = true;
       }
-      gameState.boards = oldBoards;
     }
   }
   return fleet;
 }
 
-function clearSplashesUnderShip(playerId, ship) {
+function clearSplashesUnderShip(game, playerId, ship) {
   const tiles = getShipTiles(ship);
-  gameState.opponentMisses[playerId] = gameState.opponentMisses[
-    playerId
-  ].filter(miss => {
+  game.opponentMisses[playerId] = game.opponentMisses[playerId].filter(miss => {
     return !tiles.some(t => t.x === miss.x && t.y === miss.y);
   });
 }
 
-function checkWinCondition() {
-  for (let playerId in gameState.boards) {
-    const allShipsDestroyed = gameState.boards[playerId].every(ship =>
+function checkWinCondition(roomId) {
+  const game = games[roomId];
+  if (!game) return;
+
+  for (let playerId in game.boards) {
+    const allShipsDestroyed = game.boards[playerId].every(ship =>
       ship.hits.every(hit => hit === true)
     );
     if (allShipsDestroyed) {
-      gameState.winner = Object.keys(gameState.players).find(
-        id => id !== playerId
-      );
-      io.emit("updateState", gameState);
+      game.winner = Object.keys(game.players).find(id => id !== playerId);
+      io.to(roomId).emit("updateState", game);
     }
   }
 }
@@ -124,65 +118,125 @@ function checkWinCondition() {
 io.on("connection", socket => {
   console.log("A player connected:", socket.id);
 
-  if (Object.keys(gameState.players).length >= 2) return;
-
-  gameState.players[socket.id] = true;
-  gameState.boards[socket.id] = generateRandomFleet();
-  gameState.opponentMisses[socket.id] = [];
-
-  if (Object.keys(gameState.players).length === 2) {
-    gameState.turn = Object.keys(gameState.players)[0];
-    io.emit("gameStart", gameState);
-  }
-
-  function consumeAP(amount) {
-    gameState.apRemaining -= amount;
-    if (gameState.apRemaining <= 0) {
-      gameState.turn = Object.keys(gameState.players).find(
-        id => id !== gameState.turn
-      );
-      gameState.apRemaining = 3;
+  function consumeAP(roomId, amount) {
+    const game = games[roomId];
+    game.apRemaining -= amount;
+    if (game.apRemaining <= 0) {
+      game.turn = Object.keys(game.players).find(id => id !== game.turn);
+      game.apRemaining = 3;
     }
-    checkWinCondition();
-    io.emit("updateState", gameState);
+    checkWinCondition(roomId);
+    io.to(roomId).emit("updateState", game);
   }
+
+  // --- LOBBY SYSTEM ---
+
+  socket.on("createGame", () => {
+    // Generate a random 4-character room code
+    const roomId = Math.random()
+      .toString(36)
+      .substring(2, 6)
+      .toUpperCase();
+
+    games[roomId] = {
+      players: { [socket.id]: true },
+      turn: null,
+      apRemaining: 5,
+      boards: { [socket.id]: generateRandomFleet() },
+      opponentMisses: { [socket.id]: [] },
+      winner: null
+    };
+
+    socket.roomId = roomId;
+    socket.join(roomId);
+    socket.emit("roomCreated", roomId);
+  });
+
+  socket.on("joinGame", roomId => {
+    roomId = roomId.toUpperCase();
+    const game = games[roomId];
+
+    if (!game) return socket.emit("errorMsg", "Room not found.");
+    if (Object.keys(game.players).length >= 2)
+      return socket.emit("errorMsg", "Room is full.");
+
+    game.players[socket.id] = true;
+    game.boards[socket.id] = generateRandomFleet();
+    game.opponentMisses[socket.id] = [];
+
+    socket.roomId = roomId;
+    socket.join(roomId);
+
+    // Start game if 2 players have joined
+    if (Object.keys(game.players).length === 2) {
+      game.turn = Object.keys(game.players)[0];
+      io.to(roomId).emit("gameStart", game);
+    }
+  });
+
+  // --- GAMEPLAY ACTIONS ---
 
   socket.on("shoot", ({ x, y }) => {
+    const roomId = socket.roomId;
+    const game = games[roomId];
+
+    if (!game || game.turn !== socket.id || game.apRemaining < 1 || game.winner)
+      return;
+
+    // Validate map boundaries (fixes the edge-click bug)
     if (
-      gameState.turn !== socket.id ||
-      gameState.apRemaining < 1 ||
-      gameState.winner
+      typeof x !== "number" ||
+      typeof y !== "number" ||
+      x < 0 ||
+      x >= GRID_SIZE ||
+      y < 0 ||
+      y >= GRID_SIZE
     )
       return;
-    const enemyId = Object.keys(gameState.players).find(id => id !== socket.id);
-    let hitSomething = false;
 
-    for (let ship of gameState.boards[enemyId]) {
+    const enemyId = Object.keys(game.players).find(id => id !== socket.id);
+
+    // Prevent AP drain on already missed spots
+    const alreadyMissed = game.opponentMisses[enemyId].some(
+      m => m.x === x && m.y === y
+    );
+    if (alreadyMissed) return;
+
+    let hitSomething = false;
+    let alreadyHit = false;
+
+    for (let ship of game.boards[enemyId]) {
       let tiles = getShipTiles(ship);
       let hitIndex = tiles.findIndex(t => t.x === x && t.y === y);
+
       if (hitIndex !== -1) {
-        ship.hits[hitIndex] = true;
-        hitSomething = true;
+        if (ship.hits[hitIndex] === true) {
+          alreadyHit = true; // Prevent AP drain on burning ship segments
+        } else {
+          ship.hits[hitIndex] = true;
+          hitSomething = true;
+        }
         break;
       }
     }
+
+    if (alreadyHit) return;
+
     if (!hitSomething) {
-      const alreadyMissed = gameState.opponentMisses[enemyId].some(
-        m => m.x === x && m.y === y
-      );
-      if (!alreadyMissed) gameState.opponentMisses[enemyId].push({ x, y });
+      game.opponentMisses[enemyId].push({ x, y });
     }
-    consumeAP(1);
+
+    consumeAP(roomId, 1);
   });
 
   socket.on("moveShip", ({ shipId, direction }) => {
-    if (
-      gameState.turn !== socket.id ||
-      gameState.apRemaining < 1 ||
-      gameState.winner
-    )
+    const roomId = socket.roomId;
+    const game = games[roomId];
+
+    if (!game || game.turn !== socket.id || game.apRemaining < 1 || game.winner)
       return;
-    const ship = gameState.boards[socket.id].find(s => s.id === shipId);
+
+    const ship = game.boards[socket.id].find(s => s.id === shipId);
     if (!ship || ship.hits.includes(true)) return;
 
     let newX = ship.x;
@@ -196,22 +250,22 @@ io.on("connection", socket => {
     }
 
     const proposedTiles = getShipTiles(ship, newX, newY, ship.isVertical);
-    if (isValidPlacement(proposedTiles, socket.id, ship.id)) {
+    if (isValidPlacement(proposedTiles, socket.id, ship.id, game)) {
       ship.x = newX;
       ship.y = newY;
-      clearSplashesUnderShip(socket.id, ship);
-      consumeAP(1);
+      clearSplashesUnderShip(game, socket.id, ship);
+      consumeAP(roomId, 1);
     }
   });
 
   socket.on("rotateShip", ({ shipId }) => {
-    if (
-      gameState.turn !== socket.id ||
-      gameState.apRemaining < 3 ||
-      gameState.winner
-    )
+    const roomId = socket.roomId;
+    const game = games[roomId];
+
+    if (!game || game.turn !== socket.id || game.apRemaining < 3 || game.winner)
       return;
-    const ship = gameState.boards[socket.id].find(s => s.id === shipId);
+
+    const ship = game.boards[socket.id].find(s => s.id === shipId);
     if (!ship || ship.hits.includes(true)) return;
 
     const centerIndex = Math.floor(ship.length / 2);
@@ -222,21 +276,24 @@ io.on("connection", socket => {
     const newY = newIsVertical ? pivotY - centerIndex : pivotY;
 
     const proposedTiles = getShipTiles(ship, newX, newY, newIsVertical);
-    if (isValidPlacement(proposedTiles, socket.id, ship.id)) {
+    if (isValidPlacement(proposedTiles, socket.id, ship.id, game)) {
       ship.x = newX;
       ship.y = newY;
       ship.isVertical = newIsVertical;
-      clearSplashesUnderShip(socket.id, ship);
-      consumeAP(3);
+      clearSplashesUnderShip(game, socket.id, ship);
+      consumeAP(roomId, 3);
     }
   });
 
+  // --- DISCONNECT HANDLING ---
   socket.on("disconnect", () => {
-    delete gameState.players[socket.id];
-    // Reset game if someone leaves
-    if (Object.keys(gameState.players).length < 2) {
-      gameState.winner = null;
-      gameState.turn = null;
+    console.log("Player disconnected:", socket.id);
+    const roomId = socket.roomId;
+
+    if (roomId && games[roomId]) {
+      // Notify the remaining player that they won by default due to disconnect
+      io.to(roomId).emit("enemyDisconnected");
+      delete games[roomId]; // Clean up the game from memory
     }
   });
 });
