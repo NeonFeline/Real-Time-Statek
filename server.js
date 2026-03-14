@@ -8,6 +8,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const AP_TURN_COUNT = 5;
 const app = express();
 const httpServer = createServer(app);
 
@@ -123,7 +124,7 @@ io.on("connection", socket => {
     game.apRemaining -= amount;
     if (game.apRemaining <= 0) {
       game.turn = Object.keys(game.players).find(id => id !== game.turn);
-      game.apRemaining = 3;
+      game.apRemaining = AP_TURN_COUNT;
     }
     checkWinCondition(roomId);
     io.to(roomId).emit("updateState", game);
@@ -141,7 +142,7 @@ io.on("connection", socket => {
     games[roomId] = {
       players: { [socket.id]: true },
       turn: null,
-      apRemaining: 5,
+      apRemaining: AP_TURN_COUNT,
       boards: { [socket.id]: generateRandomFleet() },
       opponentMisses: { [socket.id]: [] },
       winner: null
